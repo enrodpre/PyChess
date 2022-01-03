@@ -1,9 +1,11 @@
-from typing import Optional, Callable
+from typing import Optional, Callable, Iterator
 
 import pygame as pg
 from pygame import SRCALPHA
 
-from piece import Point
+from board import Board  # type: ignore
+from model import Slot, Moves  # type: ignore
+from piece import Color, Piece  # type: ignore
 
 pg.init()
 
@@ -42,13 +44,10 @@ class SpriteSheet:
         grid_images = [self.image_at(rect).convert_alpha() for rect in sprite_rects]
         print(f"Loaded {len(grid_images)} grid images.")
 
-        return dict(zip('kqrbnpKQRBNP', grid_images))
+        return dict(zip('kqrnbpKQRNBP', grid_images))
 
 
-BoardRepresentation = tuple[Optional[str], ...]
-
-SquareData = tuple[Optional[str], pg.Rect]
-SquareDataSet = list[SquareData]
+Square = tuple[pg.Rect, Optional[Piece]]
 
 
 class Ui:
@@ -58,80 +57,100 @@ class Ui:
     _action_square_color = pg.Color('Yellow')
     _square_side: int
     _window_resolution: tuple[int, int]
-    _squares: SquareDataSet
-    _posible_movements: dict[int, list[int]]
+    _squares: list[Square]
+    _posible_movements: Moves
     _sprites: dict[str, pg.Surface]
+    _board: Board
+    _selected_square: Optional[Slot] = None
+    _lit_squares: list[Slot] = []
 
-    _selected_square: Optional[int] = None
-
-    def __init__(self, board: BoardRepresentation, filename_sheets: str, make_move_callback: Callable):
+    def __init__(self, board: Board, filename_sheets: str, make_move_callback: Callable, debug_square: Callable):
+        self._board = board
         self._square_side = 70
         self._window_resolution = (560, 560)
         self._squares = []
         self._master = pg.display.set_mode(self._window_resolution, SRCALPHA)
         self._sprites = SpriteSheet(filename_sheets).load_sheet()
-        self._pintar_casillas(board)
         self._make_move_callback = make_move_callback
+        self._debug_square = debug_square
 
-    def next_turn(self, posible_movements: dict[int, list[int]]):
+    def initialize_ui(self):
+        self.create_squares()
+
+    def start_turn(self, posible_movements: Moves):
         self._posible_movements = posible_movements
+        self._update_squares()
 
     def loop(self):
-        def _get_coordinate(pixel: tuple[int, int]) -> Point:
-            x, y = pixel
-            return Point(x // self._square_side, y // self._square_side)
-
         running = True
         while running:
             for event in pg.event.get():
                 if event.type == pg.MOUSEBUTTONDOWN:
-                    self._handle_click(_get_coordinate(pg.mouse.get_pos()))
+                    self.handle_click(self._get_coordinate(*pg.mouse.get_pos()))
                 elif event.type == pg.QUIT:
                     running = False
 
             pg.display.flip()
 
-        pg.quit()
-
-    def _handle_click(self, clicked_coordinate: Point):
-        print(clicked_coordinate)
-        if self._selected_square is None:
-            self._enlighten_square(self._get_square(clicked_coordinate))
+    def handle_click(self, square_slot: Slot):
+        self._debug_square(square_slot.flat())
+        piece = self._board.squares[square_slot.flat()]
+        if self._selected_square is None and piece is not None and self._is_correct_turn(piece.color):
+            self.handle_not_selected(square_slot)
         else:
-            self._make_move_callback(self._selected_square, self._get_square(clicked_coordinate))
+            squares, selected = self._lit_squares, self._selected_square
+            self._restore_lit_squares()
+            if square_slot in squares:
+                self._make_move_callback(self._posible_movements.get_move(selected, square_slot))
 
-    def _get_square(self, point: Point) -> SquareData:
-        return self._squares[point.flat_integer()]
+    def handle_not_selected(self, source_point: Slot):
+        self._selected_square = source_point
+        for point in self._posible_movements.from_start(source_point):
+            posible_rect, _ = self._squares[point.flat()]
+            self._draw_rect(posible_rect, self._action_square_color)
+            self._lit_squares.append(point)
 
-    def _enlighten_square(self, data: SquareData):
-        piece, rect_object = data
+    def create_squares(self):
+        for position, square_content in enumerate(self._board.squares):
+            x, y = Slot.translate(*divmod(position, 8)[::-1])
+            rect = pg.Rect((x * self._square_side, y * self._square_side, self._square_side, self._square_side))
+            self._squares.append((rect, square_content))
+
+    def _update_squares(self):
+        for position, square_content in enumerate(self._board.squares):
+            r, p = self._squares[position]
+            self._squares[position] = (r, square_content)
+            self._update_rect(position)
+
+    def _restore_lit_squares(self):
+        for lit_square in self._lit_squares:
+            self._update_rect(lit_square.flat())
+        self._lit_squares = []
+        self._selected_square = None
+
+    def _update_rect(self, pos: int):
+        rect_object, piece = self._squares[pos]
+        self._draw_rect(rect_object, self._get_square_color(pos))
         if piece is not None:
-            self.draw_sprite(piece, rect_object)
-        self.draw_rect(rect_object, self._action_square_color)
+            self._draw_sprite(rect_object, piece.representation)
 
-    def draw_sprite(self, piece: str, rect_object: pg.rect.Rect):
+    def _get_board_data(self) -> Iterator[tuple[int, Piece]]:
+        return ((Slot.translate(*divmod(pos, 8)[::-1]).flat(), piece) for pos, piece in enumerate(self._board.squares))
+
+    def _draw_sprite(self, rect_object: pg.Rect, piece: str):
         sprite = self._sprites[piece]
         self._master.blit(sprite, sprite.get_rect(center=rect_object.center))
 
-    def draw_rect(self, rect_object: pg.Rect, color: pg.Color) -> pg.rect.Rect:
+    def _draw_rect(self, rect_object: pg.Rect, color: pg.Color) -> pg.rect.Rect:
         return pg.draw.rect(self._master, color, rect_object)
 
-    def _create_rect(self, point: Point) -> pg.rect.Rect:
-        def _get_color(square_number: int):
-            return (self._white_square_color, self._black_square_color)[
-                (-square_number - square_number // self._squares_per_side) % 2]
+    def _get_square_color(self, square_number: int):
+        return (self._white_square_color, self._black_square_color)[
+            (-square_number - square_number // self._squares_per_side) % 2]
 
-        print(point)
-        rect_object = pg.Rect((point.x * self._square_side, point.y * self._square_side),
-                              (self._square_side, self._square_side))
-        r = self.draw_rect(rect_object, _get_color(point.flat_integer()))
-        pg.display.flip()
-        return r
+    def _is_correct_turn(self, color: int):
+        return (self._board.whites_to_move and color == Color.WHITE) or (
+                not self._board.whites_to_move and color == Color.BLACK)
 
-    def _pintar_casillas(self, board: BoardRepresentation):
-        for i, square_content in enumerate(board):
-            rect = self._create_rect(Point.from_divmod(i))
-
-            if square_content is not None:
-                self.draw_sprite(square_content, rect)
-            self._squares.append((square_content, rect))
+    def _get_coordinate(self, x: int, y: int) -> Slot:
+        return Slot.translate(x // self._square_side, y // self._square_side)

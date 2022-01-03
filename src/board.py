@@ -1,41 +1,35 @@
+from copy import copy
 from dataclasses import dataclass
-from typing import Optional, Iterable, Iterator
+from typing import Optional, Iterable
 
-from piece import Piece, Square
+from piece import Piece, Color
 from util import _from_algebraic_to_int, _from_int_to_algebraic
 
-STARTING_POSITION_FEN = 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1'
+STARTING_POSITION_FEN = 'RNBQKBNR/PPPPPPPP/8/8/8/8/pppppppp/rnbqkbnr w KQkq - 0 1'
+
+# STARTING_POSITION_FEN = 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1'
+
 
 Square = Optional[Piece]
+SquaresData = list[tuple[int, Piece]]
 
 
-class Squares(tuple[Square, ...]):
-    def __new__(cls, squares: Iterable):
-        obj = super(Squares, cls).__new__(cls, squares)
-        if len(obj) != 64:
-            raise ValueError('La cantidad de squares debe ser 64')
+class Squares(list[Square]):
+    def __init__(self, seq: Iterable[Square]):
+        list.__init__(self, seq)
 
-        return obj
+    def __iter__(self):
+        return list.__iter__(self)
 
-    def skippingiter(self) -> Iterator[tuple[int, Piece]]:
-        class SquaresIterator(Iterator):
-            def __init__(self, data: Iterator[Square]):
-                self.iter = data
-                self.i = -1
+    def get_by_color(self, color: int) -> SquaresData:
+        res = []
+        for i, piece in enumerate(self.__iter__()):
+            if piece is not None and piece.color == color:
+                res.append((i, piece))
+        return res
 
-            def __next__(self) -> tuple[int, Square]:
-                while True:
-                    self.i += 1
-                    item = next(self.iter)
-                    if item is not None:
-                        return self.i, item
-
-        return SquaresIterator(super().__iter__())
-
-    def __setitem__(self, key, value):
-        new_tuple = list(self)
-        new_tuple[key:key + 1] = [value]
-        return self.__new__(self.__class__, new_tuple)
+    def __getitem__(self, value):
+        return list.__getitem__(self, value)
 
     def __str__(self):
         return '(' + ','.join(str(p) for p in self) + ')'
@@ -64,8 +58,22 @@ class Board:
     def tofen(self) -> str:
         return _to_fen(self)
 
-    def stringify(self) -> tuple[Optional[str], ...]:
-        return tuple(map(lambda sq: str(sq.representation) if sq is not None else None, self.squares))
+    def get_current_turn_pieces(self) -> list[tuple[int, Piece]]:
+        return self.squares.get_by_color(Color.WHITE if self.whites_to_move else Color.BLACK)
+
+    def prepare_next_turn(self):
+        self.fullmove_number += 1
+        self.en_passant_target = None
+        wtm = self.whites_to_move
+        if not wtm:
+            self.halfmove_clock += 1
+
+        self.whites_to_move = not wtm
+
+    def swap(self, a: int, b: int):
+        c = copy(self.squares[a])
+        self.squares[a], self.squares[b] = self.squares[b], self.squares[a]
+        print(c == self.squares[a])
 
 
 def _from_fen(fen_str: str) -> Board:

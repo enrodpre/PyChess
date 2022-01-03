@@ -2,7 +2,8 @@ import os
 import sys
 
 from board import Board
-from move import generar_cada_movimiento
+from model import Move
+from move import generate_movements, debug_piece
 from ui import Ui
 
 
@@ -21,14 +22,27 @@ def getpath():
 sprite_filename = getpath() + '/resources/sprites.png'
 
 
-def make_move(start: int, end: int):
-    pass
+class Game:
+    board: Board
+    ui: Ui
 
+    def __init__(self):
+        self.board = Board.classic()
+        self.ui = Ui(self.board, sprite_filename, self.end_turn, lambda i: debug_piece(i))
 
-def iniciar_partida():
-    board = Board.classic()
+    def initialize_game(self):
+        self.ui.initialize_ui()
+        self.start_turn()
+        self.ui.loop()
 
-    ui = Ui(board.stringify(), sprite_filename, make_move)
-    posible_movements = generar_cada_movimiento(board)
-    ui.next_turn(posible_movements)
-    ui.loop()
+    def start_turn(self):
+        self.ui.start_turn(generate_movements(self.board))
+
+    def end_turn(self, move: Move):
+        start, end, side_effects = move
+        self.board.swap(start.flat(), end.flat())
+
+        self.board.prepare_next_turn()
+        for func in side_effects:
+            func(self.board, start, end)
+        self.start_turn()

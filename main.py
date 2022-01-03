@@ -1,11 +1,11 @@
-from game import iniciar_partida
+from game import Game
 from src.piece import Piece
 
 
 def main():
     p = Piece.fromstr('b')
-    print(p)
-    iniciar_partida()
+    g = Game()
+    g.initialize_game()
 
 
 if __name__ == '__main__':

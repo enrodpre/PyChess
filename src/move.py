@@ -1,15 +1,15 @@
 from __future__ import annotations
 
 import copy
-from itertools import chain, permutations, repeat, starmap
+import pprint
+from itertools import chain, repeat, starmap
 from typing import Iterator, Callable
 
 from aenum import Enum
 
-from board import Board
 from model import LEFT_TOP_DIRECTION, LEFT_BOTTOM_DIRECTION, RIGHT_BOTTOM_DIRECTION, RIGHT_TOP_DIRECTION, \
-    LEFT_DIRECTION, BOTTOM_DIRECTION, Slot, Vector, RIGHT_DIRECTION, TOP_DIRECTION, Move, Moves
-from piece import Color, PieceType, Piece
+    LEFT_DIRECTION, BOTTOM_DIRECTION, Slot, Vector, RIGHT_DIRECTION, TOP_DIRECTION, Move, Moves, GameState, Color, \
+    PieceType, Piece
 
 MovesIterator = Iterator[Move]
 
@@ -18,49 +18,71 @@ def _get_direction(color: int) -> int:
     return 1 if color == Color.WHITE else -1
 
 
-def _is_inbound(slot: Slot) -> bool:
-    x, y = slot
-    return 0 <= y <= 7 and 0 <= x <= 7
+def is_legal_status():
+    pass
 
 
 class MoveGenerator:
     class MovementFlag(Enum):
         ILLEGAL = 0
-        TAKABLE = 1
-        EMPTY_SAFE = 2
-        EMPTY_THREATENED = 3
+        TAKABLE_SAFE = 1
+        TAKABLE_THREATENED = 2
+        EMPTY_SAFE = 3
+        EMPTY_THREATENED = 4
 
-    board: Board
+    game_state: GameState
+    threats: set[Slot]
+    generating_threats: bool
 
-    def get_flag_move(self, slot: Slot, color: int, can_take: bool) -> int:
-        if not _is_inbound(slot):
+    def get_flag_move(self, move: Move, can_take: bool) -> int:
+        start, target_slot, *_ = move
+
+        def is_target_safe() -> bool:
+            if not self.generating_threats:
+                return target_slot in self.threats
+
+        def takable() -> int:
+            if is_target_safe():
+                return self.MovementFlag.TAKABLE_THREATENED
+            else:
+                return self.MovementFlag.TAKABLE_SAFE
+
+        def is_inbound(slot: Slot) -> bool:
+            x, y = slot
+            return 0 <= y <= 7 and 0 <= x <= 7
+
+        if not is_inbound(target_slot):
             return self.MovementFlag.ILLEGAL
-        position = slot.flat()
-        target = self.board.squares[position]
-        if target is not None or self.board.en_passant_target == position:
-            if target.color == color:
+
+        piece = self.game_state.board[start.flat()]
+        flat_end = target_slot.flat()
+        target_square = self.game_state.board[flat_end]
+        if target_square is not None:
+            if target_square.color == piece.color:
                 return self.MovementFlag.ILLEGAL
             if can_take:
-                return self.MovementFlag.TAKABLE
-        return self.MovementFlag.EMPTY_SAFE
+                return takable()
 
-    def _filter_moves(self, v: MovesIterator, color: int, can_take: bool, checker_function: Callable) -> MovesIterator:
-        # try:
-        for move in v:
-            if move is not None and checker_function(self.get_flag_move(move.end, color, can_take)):
-                yield move
-            else:
-                pass
-                # print(f'Discarded move -> {move}')
-        # except TypeError:
-        #    pass
+        # en passant
+        if piece.type == PieceType.PAWN and self.game_state.en_passant_target == flat_end:
+            return takable()
 
-    def pawn_movement(self, posicion: int, color: int) -> MovesIterator:
+        if is_target_safe():
+            return self.MovementFlag.EMPTY_SAFE
+        else:
+            return self.MovementFlag.EMPTY_THREATENED
+
+    def _filter_moves(self, v: MovesIterator, can_take: bool, checker_function: Callable) -> MovesIterator:
+        yield from (move for move in v if move is not None and checker_function(
+            self.get_flag_move(move, can_take)))  # and self.generating_threats and not can_take)
+
+    def pawn_movement(self, posicion: int) -> MovesIterator:
         start = Slot.fromflat(posicion)
+        color = self.game_state.board[posicion].color
         direction_vector = _get_direction(color)
 
         def _forward_movements(s: Slot, c: int, d: int) -> MovesIterator:
-            def set_en_passant(board: Board, slot: Slot, _):
+            def set_en_passant(board: GameState, slot: Slot, _):
                 board.en_passant_target = (slot + (0, 1)).flat()
 
             yield Move(s, s + Vector(0, 1, d))
@@ -76,48 +98,56 @@ class MoveGenerator:
         def _attack(s: Slot, direction: int) -> MovesIterator:
             yield from (Move(s, s + Vector(*v, d)) for v, d in zip([(1, 1), (1, -1)], repeat(direction, 2)))
 
-        yield from self._filter_moves(_forward_movements(start, color, direction_vector), color,
-                                      False, lambda flag: flag == self.MovementFlag.EMPTY_SAFE)
-        yield from self._filter_moves(_attack(start, direction_vector), color, True,
-                                      lambda flag: flag == self.MovementFlag.TAKABLE)
+        if self.generating_threats:
+            yield from self._filter_moves(_forward_movements(start, color, direction_vector),
+                                          False, lambda flag: flag == self.MovementFlag.EMPTY_SAFE)
+        yield from self._filter_moves(_attack(start, direction_vector), True,
+                                      lambda flag: flag == self.MovementFlag.TAKABLE_SAFE)
 
-    def knight_movement(self, posicion: int, color: int) -> MovesIterator:
+    def knight_movement(self, posicion: int) -> MovesIterator:
         start = Slot.fromflat(posicion)
         steps = ((1, 2), (-1, 2), (1, -2), (-1, -2), (2, 1), (-2, 1), (2, -1), (-2, -1))
         yield from self._filter_moves(
             (Move(start, start + step) for step in steps),
-            color, False, lambda flag: flag != self.MovementFlag.ILLEGAL
+            False, lambda flag: flag != self.MovementFlag.ILLEGAL
         )
 
-    def _travel_squares(self, posicion: int, color: int, directions: tuple[Vector, ...]) -> MovesIterator:
+    def _travel_squares(self, posicion: int, directions: tuple[Vector, ...]) -> MovesIterator:
+        start = Slot.fromflat(posicion)
         for direction in directions:
-            current = Slot.fromflat(posicion)
+            current = copy.copy(start)
             while True:
                 current += direction
-                step_result = self.get_flag_move(current, color, True)
+                if current == (8, 7):
+                    pass
+                step_result = self.get_flag_move(Move(start, current), True)
                 if step_result != self.MovementFlag.ILLEGAL:
-                    yield Move(Slot.fromflat(posicion), current)
+                    yield Move(start, current)
                 if step_result != self.MovementFlag.EMPTY_SAFE:
                     break
 
     BISHOP_MOVEMENTS = (LEFT_TOP_DIRECTION, LEFT_BOTTOM_DIRECTION, RIGHT_BOTTOM_DIRECTION, RIGHT_TOP_DIRECTION)
 
-    def bishop_movement(self, posicion: int, color: int) -> MovesIterator:
-        yield from self._travel_squares(posicion, color, self.BISHOP_MOVEMENTS)
+    def bishop_movement(self, posicion: int) -> MovesIterator:
+        yield from self._travel_squares(posicion, self.BISHOP_MOVEMENTS)
 
     ROOK_MOVEMENTS = (TOP_DIRECTION, RIGHT_DIRECTION, BOTTOM_DIRECTION, LEFT_DIRECTION)
 
-    def rook_movement(self, posicion: int, color: int) -> MovesIterator:
-        yield from self._travel_squares(posicion, color, self.ROOK_MOVEMENTS)
+    def rook_movement(self, posicion: int) -> MovesIterator:
+        yield from self._travel_squares(posicion, self.ROOK_MOVEMENTS)
 
-    QUEEN_MOVEMENTS = BISHOP_MOVEMENTS + ROOK_MOVEMENTS
+    GODLIKE_MOVEMENTS = BISHOP_MOVEMENTS + ROOK_MOVEMENTS
 
-    def queen_movement(self, posicion: int, color: int) -> MovesIterator:
-        yield from self.bishop_movement(posicion, color)
-        yield from self.rook_movement(posicion, color)
+    def queen_movement(self, posicion: int) -> MovesIterator:
+        yield from self.bishop_movement(posicion)
+        yield from self.rook_movement(posicion)
 
-    def king_movements(self, posicion: int, color: int) -> MovesIterator:
+    def king_movements(self, posicion: int) -> MovesIterator:
+        if self.generating_threats:
+            return iter(())
+
         start = Slot.fromflat(posicion)
+        color = self.game_state.board[posicion].color
         king_direction, queen_direction = Vector(2, 0), Vector(-2, 0)
         rook_king_direction, rook_queen_direction = Vector(-2, 0), Vector(3, 0)
         rook_king_position, rook_queen_position = Slot(7, 0).reverse(), Slot(0, 0).reverse()
@@ -126,7 +156,7 @@ class MoveGenerator:
             current = copy.copy(start)
             while True:
                 current += next_step
-                if self.MovementFlag.EMPTY_SAFE != self.get_flag_move(current, color, False):
+                if self.MovementFlag.EMPTY_SAFE != self.get_flag_move(Move(start, current), False):
                     return False
                 if current == end:
                     return True
@@ -139,30 +169,30 @@ class MoveGenerator:
         def _castle() -> MovesIterator:
             def build_move(king_start: Slot, king_move: Vector, rook_start: Slot, rook_move: Vector) -> Move:
                 return Move(king_start, king_start + king_move).add_side_effect(
-                    lambda board, *_: board.swap(rook_start.flat(), (rook_start + rook_move).flat()))
+                    lambda board, *_: board.move(rook_start.flat(), (rook_start + rook_move).flat()))
 
             if color == Color.WHITE:
-                if (self.board.white_king_can_castle and
+                if (self.game_state.white_king_can_castle and
                         _try_castling(king_direction, RIGHT_DIRECTION, rook_king_position, rook_king_direction,
                                       LEFT_DIRECTION)):
                     yield build_move(start, king_direction, rook_king_position, rook_queen_position)
 
-                if (self.board.white_queen_can_castle and
+                if (self.game_state.white_queen_can_castle and
                         _try_castling(queen_direction, LEFT_DIRECTION, rook_queen_position, rook_queen_direction,
                                       RIGHT_DIRECTION)):
                     yield build_move(start, queen_direction, rook_queen_position, rook_queen_direction)
             else:
-                if self.board.black_king_can_castle and _try_castling(king_direction, RIGHT_DIRECTION,
-                                                                      rook_king_position.reverse(),
-                                                                      rook_king_direction, LEFT_DIRECTION):
+                if self.game_state.black_king_can_castle and _try_castling(king_direction, RIGHT_DIRECTION,
+                                                                           rook_king_position.reverse(),
+                                                                           rook_king_direction, LEFT_DIRECTION):
                     yield build_move(start, king_direction, rook_king_position.reverse(), rook_king_direction)
-                if self.board.black_queen_can_castle and _try_castling(queen_direction, LEFT_DIRECTION,
-                                                                       rook_queen_position.reverse(),
-                                                                       rook_queen_direction, RIGHT_DIRECTION):
+                if self.game_state.black_queen_can_castle and _try_castling(queen_direction, LEFT_DIRECTION,
+                                                                            rook_queen_position.reverse(),
+                                                                            rook_queen_direction, RIGHT_DIRECTION):
                     yield build_move(start, queen_direction, rook_queen_position.reverse(), rook_queen_direction)
 
-        def forbid_castle(board: Board, start_position: Slot, _: Slot) -> None:
-            piece_type, piece_color = board.squares[start_position.flat()]
+        def forbid_castle(board: GameState, start_position: Slot, _: Slot) -> None:
+            piece_type, piece_color = board.board[start_position.flat()]
 
             def check_rook(*compared_position) -> bool:
                 return piece_type is piece_type.ROOK and start_position == compared_position
@@ -179,8 +209,13 @@ class MoveGenerator:
                 elif check_rook(7, 7) or is_king:
                     board.black_king_can_castle = False
 
-        for step in filter(lambda p: p != [0, 0], permutations([1, 0, -1], 2)):
-            yield Move(start, start + step).add_side_effect(forbid_castle)
+        def ensure_safety_of_master(level_of_danger: int) -> bool:
+            return level_of_danger == self.MovementFlag.EMPTY_SAFE or level_of_danger == self.MovementFlag.TAKABLE_SAFE
+
+        yield from (move.add_side_effect(forbid_castle) for move in
+                    self._filter_moves((Move(start, start + step) for step in self.GODLIKE_MOVEMENTS), True,
+                                       ensure_safety_of_master))
+
         yield from _castle()
 
 
@@ -188,15 +223,24 @@ generator = MoveGenerator()
 
 
 def _generate_movements_per_piece(i: int, piece: Piece) -> MovesIterator:
-    switch: dict[int, Callable[[int, int], MovesIterator]]
-    switch = {0: generator.pawn_movement, 1: generator.knight_movement, 2: generator.bishop_movement,
-              3: generator.rook_movement, 4: generator.queen_movement, 5: generator.king_movements}
-    func = switch[PieceType(piece.type).value]
-    if not (0 <= i <= 63):
-        pass
-    res = func(i, piece.color)
-    return res
-    # return (translate_move(m) for m in res)
+    match piece.type:  # type: ignore
+        case PieceType.PAWN:
+            func = generator.pawn_movement
+        case PieceType.KNIGHT:
+            func = generator.knight_movement
+        case PieceType.BISHOP:
+            func = generator.bishop_movement
+        case PieceType.ROOK:
+            func = generator.rook_movement
+        case PieceType.QUEEN:
+            func = generator.queen_movement
+        case PieceType.KING:
+            func = generator.king_movements
+        case _:
+            raise ValueError
+
+    result = func(i)
+    return result
 
 
 def debug_piece(i: int):
@@ -212,25 +256,33 @@ def translate_move(move: Move) -> Move:
     return move
 
 
-def generate_movements(board: Board) -> Moves:
-    generator.board = board
-    pieces = board.get_current_turn_pieces()
-    moves = starmap(_generate_movements_per_piece, pieces)
-    return Moves(chain.from_iterable(moves))
+def generate_threats(pieces: Iterator[tuple[int, Piece]]):
+    generator.generating_threats = True
+    threatening_moves = starmap(_generate_movements_per_piece, pieces)
+    generator.threats = set(chain.from_iterable(threatening_moves))
+    generator.generating_threats = False
+
+    pass
+
+
+def generate_movements(game_state: GameState) -> Moves:
+    generator.game_state = game_state
+    pieces = game_state.get_pieces()
+    threatening_pieces, moving_pieces = pieces
+    generate_threats(threatening_pieces)
+
+    actual_moves = Moves(chain.from_iterable(starmap(_generate_movements_per_piece, moving_pieces)))
+    print('threats')
+    pprint.pp(generator.threats)
+    print('movements')
+    pprint.pp(actual_moves)
+
+    return actual_moves
 
     """
-    match piece_type:  # type: ignore
-            case PieceType.PAWN:
-                func = generator.pawn_movement
-            case PieceType.KNIGHT:
-                func = generator.knight_movement
-            case PieceType.BISHOP:
-                func = generator.bishop_movement
-            case PieceType.ROOK:
-                func = generator.rook_movement
-            case PieceType.QUEEN:
-                func = generator.queen_movement
-            case PieceType.KING:
-                func = generator.king_movements
-            case _:
-                raise ValueError"""
+    switch: dict[int, Callable[[int], MovesIterator]]
+    switch = {0: generator.pawn_movement, 1: generator.knight_movement, 2: generator.bishop_movement,
+              3: generator.rook_movement, 4: generator.queen_movement, 5: generator.king_movements}
+    func = switch[PieceType(piece.type).value]
+    r = func(i)
+    """

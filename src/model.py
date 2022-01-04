@@ -1,15 +1,91 @@
 from __future__ import annotations
 
+import copy
 import pprint
 from collections import UserDict, deque
-from itertools import groupby
-from typing import Callable, Iterator
+from dataclasses import dataclass
+from itertools import groupby, chain
+from typing import Callable, Iterator, Optional, Iterable
 
-from board import Board
+from aenum import Enum
+from more_itertools import partition
+
+from util import _from_int_to_algebraic, _from_algebraic_to_int
+
+COLOR_REPRESENTATION = ('upper', 'lower')
+PIECETYPE_REPRESENTATION = ('P', 'N', 'B', 'R', 'Q', 'K')
 
 
-def check_unitvector(i: int) -> bool:
-    return -1 <= i <= 1
+class Color(Enum):
+    def get_representation(self) -> str:
+        return COLOR_REPRESENTATION[self.value]
+
+    def __str__(self):
+        return self.name
+
+    WHITE = True
+    BLACK = False
+
+
+class PieceType(Enum):
+    @classmethod
+    def from_representation(cls, representation: str):
+        return cls(PIECETYPE_REPRESENTATION.index(representation.upper()))
+
+    def get_representation(self) -> str:
+        return PIECETYPE_REPRESENTATION[self.value]
+
+    def __str__(self):
+        return self.name
+
+    def __repr__(self):
+        return self.__str__()
+
+    PAWN = 0
+    KNIGHT = 1
+    BISHOP = 2
+    ROOK = 3
+    QUEEN = 4
+    KING = 5
+
+
+# (COLOR_NAMES, COLOR_VALUES) = zip(*map(lambda col: (col.name, col.value), Color))
+# (PIECETYPE_NAMES, PIECETYPE_VALUES) = zip(*map(lambda t: (t.name, t.value), PieceType))
+
+
+@dataclass
+class Piece:
+    color: Color
+    type: PieceType
+    representation: str
+
+    @classmethod
+    def fromstr(cls, piece: str):
+        def iswhite(p: str) -> bool:
+            return p.isupper()
+
+        if piece is None:
+            return None
+        _color = Color(int(not iswhite(piece)))
+        _type = PieceType.from_representation(piece)
+        return Piece(_color, _type, piece)
+
+    def tostr(self) -> str:
+        return self.representation
+
+    def __iter__(self):
+        yield self.color
+        yield self.type
+
+
+"""def _generate_pieces() -> list[Piece]:
+    whites = ('P', 'N', 'B', 'R', 'Q', 'K')
+    blacks = tuple(w.lower() for w in whites)
+    return list(Piece(c, t, r) for (c, t), r in zip(product(COLOR_VALUES, PIECETYPE_VALUES), whites + blacks))
+
+
+PIECES_LIST = _generate_pieces()
+"""
 
 
 class Point:
@@ -111,17 +187,14 @@ class Slot(Point):
         return self
 
 
-SideEffect = Callable[[Board, Slot, Slot], None]
-
-
 class Move:
     start: Slot
     end: Slot
-    side_effects: deque[SideEffect]
+    side_effects: deque[Callable]
 
     def __init__(self, start: Slot, end: Slot):
-        self.start = start
-        self.end = end
+        self.start = copy.copy(start)
+        self.end = copy.copy(end)
         self.side_effects = deque()
 
     def __iter__(self):
@@ -135,7 +208,7 @@ class Move:
     def __repr__(self):
         return self.__str__()
 
-    def add_side_effect(self, side_effect: SideEffect):
+    def add_side_effect(self, side_effect: Callable):
         self.side_effects.append(side_effect)
         return self
 
@@ -145,10 +218,6 @@ class Move:
         return self
 
 
-def groupby_dict(data: Iterator, key: str) -> dict:
-    return {key: list(d) for key, d in groupby(data, key=lambda move: getattr(move, key))}
-
-
 class Moves(UserDict[Slot, list[Move]]):
     def __init__(self, moves: Iterator[Move]):
         super().__init__()
@@ -156,6 +225,9 @@ class Moves(UserDict[Slot, list[Move]]):
         # self.debug()
 
     def add_moves(self, moves: Iterator[Move]) -> None:
+        def groupby_dict(data: Iterator, key: str) -> dict:
+            return {key: list(d) for key, d in groupby(data, key=lambda move: getattr(move, key))}
+
         self.update(groupby_dict(moves, 'start'))
 
     def get_move(self, start: Slot, end: Slot) -> Move:
@@ -173,3 +245,126 @@ class Moves(UserDict[Slot, list[Move]]):
 
     def debug(self):
         pprint.pp(self)
+
+    def _end_iterator(self) -> Iterator[Slot]:
+        return (end for _, end, _ in chain.from_iterable(self.values()))
+
+    def search_end(self, target: Slot) -> bool:
+        return next((a for a in self._end_iterator() if a == target), False) is not None
+
+    def get_ends(self) -> list[Slot]:
+        return list(self._end_iterator())
+
+
+Square = Optional[Piece]
+
+
+class Board(list[Square]):
+    def __init__(self, seq: Iterable[Square]):
+        list.__init__(self, seq)
+
+    def filtered_iterator(self) -> Iterator[tuple[int, Piece]]:
+        yield from ((i, p) for i, p in enumerate(self) if p is not None)
+
+    def __str__(self):
+        return '(' + ','.join(str(p) for p in self) + ')'
+
+    def move(self, start: int, end: int):
+        self[end] = self[start]
+        self[start] = None
+
+
+@dataclass
+class GameState:
+    board: Board
+    whites_to_move: bool
+    white_king_can_castle: bool
+    white_queen_can_castle: bool
+    black_king_can_castle: bool
+    black_queen_can_castle: bool
+    en_passant_target: Optional[int]
+    halfmove_clock: int
+    fullmove_number: int
+
+    def get_pieces(self) -> tuple[Iterator[tuple[int, Piece]], Iterator[tuple[int, Piece]]]:
+        return partition(lambda s: s[1].color.value == self.whites_to_move, self.board.filtered_iterator())
+
+    def prepare_next_turn(self):
+        self.fullmove_number += 1
+        self.en_passant_target = None
+        wtm = self.whites_to_move
+        if not wtm:
+            self.halfmove_clock += 1
+
+        self.whites_to_move = not wtm
+
+    def move(self, start: int, end: int):
+        self.board.move(start, end)
+
+    @classmethod
+    def from_fen(cls, fen_str: str):
+        str_squares, next_move, castles, en_passant, halfmove, fullmove = fen_str.split(' ')
+        square_list: list[Optional[str]] = []
+        for row in str_squares.split('/'):
+            for char in row:
+                if char.isnumeric():
+                    square_list += [None] * int(char)
+                    continue
+
+                square_list.append(char)
+
+        squares = Board(map(lambda c: Piece.fromstr(c) if c is not None else None, square_list))
+        whites_to_move = next_move == 'w'
+        white_king_can_castle = 'K' in castles
+        white_queen_can_castle = 'Q' in castles
+        black_king_can_castle = 'k' in castles
+        black_queen_can_castle = 'q' in castles
+        en_passant_target = None if en_passant == '-' else _from_algebraic_to_int(en_passant)
+        halfmove_clock = int(halfmove)
+        fullmove_number = int(fullmove)
+
+        return GameState(squares, whites_to_move, white_king_can_castle, white_queen_can_castle, black_king_can_castle,
+                         black_queen_can_castle, en_passant_target, halfmove_clock, fullmove_number)
+
+    def to_fen(self) -> str:
+        rows = []
+        squares = self.board
+        blank_counter = 1
+        data = squares
+        for i in range(8):
+            row_str, data = data[:8], data[8:]
+            row = ''
+            for piece in row_str:
+                if piece is None:
+                    blank_counter += 1
+                else:
+                    if blank_counter > 1:
+                        row += str(blank_counter)
+                        blank_counter = 1
+                    row += piece.tostr()
+            if blank_counter > 1:
+                row += str(blank_counter - 1)
+                blank_counter = 1
+            rows += [row]
+
+        fen_result = '/'.join(rows)
+        fen_result += ' '
+
+        fen_result += 'w' if self.whites_to_move else 'b'
+        fen_result += ' '
+
+        castles = ''
+        castles += 'K' if self.white_king_can_castle else ''
+        castles += 'Q' if self.white_queen_can_castle else ''
+        castles += 'k' if self.black_king_can_castle else ''
+        castles += 'q' if self.black_queen_can_castle else ''
+
+        fen_result += castles if castles != '' else '-'
+        fen_result += ' '
+
+        fen_result += _from_int_to_algebraic(
+            self.en_passant_target) if self.en_passant_target is not None else '-'
+        fen_result += ' '
+
+        fen_result += str(self.halfmove_clock) + ' ' + str(self.fullmove_number)
+        return fen_result

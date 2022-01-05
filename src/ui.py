@@ -1,4 +1,4 @@
-from typing import Optional, Callable, Iterator
+from typing import Optional, Callable
 
 import pygame as pg
 from pygame import SRCALPHA
@@ -57,7 +57,6 @@ class Ui:
     _window_resolution: tuple[int, int]
     _squares: list[Square]
     _posible_movements: Moves
-    _posible_threats: Moves
     _sprites: dict[str, pg.Surface]
     _game_state: GameState
     _selected_square: Optional[Slot] = None
@@ -76,8 +75,7 @@ class Ui:
     def initialize_ui(self):
         self.create_squares()
 
-    def start_turn(self, posible_movements: Moves, posible_threats: Moves = None):
-        self._posible_threats = posible_threats
+    def start_turn(self, posible_movements: Moves):
         self._posible_movements = posible_movements
         self._update_squares()
 
@@ -93,10 +91,11 @@ class Ui:
             pg.display.flip()
 
     def handle_click(self, square_slot: Slot):
-        self._debug_square(square_slot.flat())
         piece = self._game_state.board[square_slot.flat()]
         if self._selected_square is None and piece is not None and self._is_correct_turn(piece.color):
             self.handle_not_selected(square_slot)
+            self._debug_square(square_slot.flat())
+            print(piece)
         else:
             squares, selected = self._lit_squares, self._selected_square
             self._restore_lit_squares()
@@ -112,13 +111,14 @@ class Ui:
             self._lit_squares.append(point)
 
     def create_squares(self):
-        for position, square_content in enumerate(self._game_state.board):
+        for position, square_content in self._game_state.board.translated_iterator():
+            # x, y = Slot.translate(*divmod(position, 8)[::-1])
             x, y = Slot.translate(*divmod(position, 8)[::-1])
             rect = pg.Rect((x * self._square_side, y * self._square_side, self._square_side, self._square_side))
             self._squares.append((rect, square_content))
 
     def _update_squares(self):
-        for position, square_content in enumerate(self._game_state.board):
+        for position, square_content in self._game_state.board.translated_iterator():
             r, p = self._squares[position]
             self._squares[position] = (r, square_content)
             self._update_rect(position)
@@ -134,10 +134,6 @@ class Ui:
         self._draw_rect(rect_object, color if color is not None else self._get_square_color(pos))
         if piece is not None:
             self._draw_sprite(rect_object, piece.representation)
-
-    def _get_board_data(self) -> Iterator[tuple[int, Piece]]:
-        return ((Slot.translate(*divmod(pos, 8)[::-1]).flat(), piece) for pos, piece in
-                enumerate(self._game_state.board))
 
     def _draw_sprite(self, rect_object: pg.Rect, piece: str):
         sprite = self._sprites[piece]

@@ -4,11 +4,12 @@ import copy
 import pprint
 from collections import UserDict, deque
 from dataclasses import dataclass
+from functools import cache
 from itertools import groupby, chain
 from typing import Callable, Iterator, Optional, Iterable
 
 from aenum import Enum
-from more_itertools import partition
+from more_itertools import partition, divide
 
 from util import _from_int_to_algebraic, _from_algebraic_to_int
 
@@ -145,7 +146,7 @@ RIGHT_BOTTOM_DIRECTION = Vector(1, -1)
 BOTTOM_DIRECTION = Vector(0, -1)
 LEFT_BOTTOM_DIRECTION = Vector(-1, -1)
 LEFT_DIRECTION = Vector(-1, 0)
-LEFT_TOP_DIRECTION = Vector(1, -1)
+LEFT_TOP_DIRECTION = Vector(-1, 1)
 
 
 class Slot(Point):
@@ -194,7 +195,7 @@ class Move:
 
     def __init__(self, start: Slot, end: Slot):
         self.start = copy.copy(start)
-        self.end = copy.copy(end)
+        self.end = end
         self.side_effects = deque()
 
     def __iter__(self):
@@ -203,7 +204,7 @@ class Move:
         yield self.side_effects
 
     def __str__(self):
-        return f'Move(end={self.end})'
+        return f'Move(start={self.start}, end={self.end})'
 
     def __repr__(self):
         return self.__str__()
@@ -216,6 +217,13 @@ class Move:
         self.start.reverse()
         self.end.reverse()
         return self
+
+    def as_values(self) -> tuple[int, int]:
+        return self.start.flat(), self.end.flat()
+
+    @classmethod
+    def from_step(cls, start: Slot, step: Vector):
+        return cls(start, start + step)
 
 
 class Moves(UserDict[Slot, list[Move]]):
@@ -259,19 +267,52 @@ class Moves(UserDict[Slot, list[Move]]):
 Square = Optional[Piece]
 
 
+@cache
+def translate(i: int):
+    return Slot.translate(*divmod(i, 8)[::-1]).flat()
+
+
 class Board(list[Square]):
     def __init__(self, seq: Iterable[Square]):
         list.__init__(self, seq)
 
-    def filtered_iterator(self) -> Iterator[tuple[int, Piece]]:
-        yield from ((i, p) for i, p in enumerate(self) if p is not None)
+    def filtered_translated_iterator(self) -> Iterator[tuple[int, Piece]]:
+        return ((i, e) for i, e in self.translated_iterator() if e is not None)
+
+    def translated_iterator(self) -> Iterator[tuple[int, Square]]:
+        return iter(sorted(map(lambda x: (translate(x[0]), x[1]), enumerate(list.__iter__(self))), key=lambda x: x[0]))
+
+    def __getitem__(self, i: int):
+        return list.__getitem__(self, i)
+
+    def __iter__(self):
+        return list.__iter__(self)
 
     def __str__(self):
-        return '(' + ','.join(str(p) for p in self) + ')'
+        row_count = 7
+        res = ' ' * 3 + '-' * 17 + '\n'
+        for row in divide(8, self):
+            res += str(row_count) + ' |' + ' '.join(
+                [c.representation if c is not None else '-' for c in row]) + '|' + '\n'
+            row_count -= 1
+        res += ' ' * 3 + '-' * 17 + '\n'
+        res += ' ' * 3 + ' '.join(map(str, range(0, 8, 1)))
+        return res
+
+    __repr__ = __str__
 
     def move(self, start: int, end: int):
         self[end] = self[start]
         self[start] = None
+
+
+ColorwisePieceSet = Iterator[tuple[int, Piece]]
+PieceSet = tuple[ColorwisePieceSet, ColorwisePieceSet]
+
+
+class StateFlag(Enum):
+    NORMAL = 0
+    CHECK = 1
 
 
 @dataclass
@@ -285,9 +326,14 @@ class GameState:
     en_passant_target: Optional[int]
     halfmove_clock: int
     fullmove_number: int
+    state_flag: int
 
-    def get_pieces(self) -> tuple[Iterator[tuple[int, Piece]], Iterator[tuple[int, Piece]]]:
-        return partition(lambda s: s[1].color.value == self.whites_to_move, self.board.filtered_iterator())
+    def get_board_copy(self) -> Board:
+        return copy.copy(self.board)
+
+    def get_pieces(self) -> PieceSet:
+        return partition(lambda s: s[1].color.value == self.whites_to_move,
+                         ((i, e) for i, e in enumerate(self.board) if e is not None))
 
     def prepare_next_turn(self):
         self.fullmove_number += 1
@@ -299,7 +345,7 @@ class GameState:
         self.whites_to_move = not wtm
 
     def move(self, start: int, end: int):
-        self.board.move(start, end)
+        self.board.move(translate(start), translate(end))
 
     @classmethod
     def from_fen(cls, fen_str: str):
@@ -324,17 +370,15 @@ class GameState:
         fullmove_number = int(fullmove)
 
         return GameState(squares, whites_to_move, white_king_can_castle, white_queen_can_castle, black_king_can_castle,
-                         black_queen_can_castle, en_passant_target, halfmove_clock, fullmove_number)
+                         black_queen_can_castle, en_passant_target, halfmove_clock, fullmove_number, StateFlag.NORMAL)
 
     def to_fen(self) -> str:
         rows = []
         squares = self.board
         blank_counter = 1
-        data = squares
         for i in range(8):
-            row_str, data = data[:8], data[8:]
             row = ''
-            for piece in row_str:
+            for piece in divide(8, squares):
                 if piece is None:
                     blank_counter += 1
                 else:

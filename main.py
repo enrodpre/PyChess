@@ -1,8 +1,8 @@
-from game import Game
+from chess import start_chess
 
 
 def main():
-    Game()
+    start_chess()
 
 
 if __name__ == '__main__':

@@ -1,16 +1,14 @@
 import unittest
 
-from game import STARTING_POSITION_FEN
+from game import GameManager
 from model import GameState
 
 
 class MyTestCase(unittest.TestCase):
-    def test_something(self):
-        g = GameState.from_fen(STARTING_POSITION_FEN)
-        b = g.board
-
-        for i, e in b:
-            self.assertEqual(e, b[i])
+    def test_fen(self):
+        g = GameState.from_fen(GameManager.STARTING_POSITION_FEN)
+        b = g.to_fen()
+        self.assertEqual(GameManager.STARTING_POSITION_FEN, b)
 
 
 if __name__ == '__main__':
